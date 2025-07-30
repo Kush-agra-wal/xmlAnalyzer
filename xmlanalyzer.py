@@ -29,57 +29,51 @@ def parse_bounds(bounds_str):
         return tuple(map(int, match.groups()))
     return (0, 0, 0, 0)
 
-def find_topmost_popup(xml_path="window_dump.xml", screen_size=(1080, 1920), min_area_ratio=0.05, max_area_ratio=0.98):
+def find_topmost_popup(xml_path="window_dump.xml", screen_size=(1080, 1920), min_area_ratio=0.05, max_area_ratio=0.95):
     try:
         tree = ET.parse(xml_path)
+        root = tree.getroot()
     except (FileNotFoundError, ET.ParseError):
+        print(f"Error: Could not parse {xml_path}")
         return None
 
-    root = tree.getroot()
     screen_w, screen_h = screen_size
     screen_area = screen_w * screen_h
     if screen_area == 0:
         return None
 
-    candidates = []
-    for node in root.iter('node'):
+    # Heuristic 1: A 'Dialog' class is the most reliable sign.
+    for node in reversed(list(root.iter('node'))):
+        if 'Dialog' in node.attrib.get('class', ''):
+            return node
+
+    # Heuristic 2: Find a large, clickable "scrim" and return its content panel.
+    # This is a very common and stable UI pattern for popups and bottom sheets.
+    for node in reversed(list(root.iter('node'))):
         attributes = node.attrib
-        if attributes.get('clickable') != 'true' or 'bounds' not in attributes:
-            continue
-        if not list(node):
-            continue
-        if 'system' in attributes.get('resource-id', ''):
+        bounds_str = attributes.get('bounds')
+        if not bounds_str or not list(node):
             continue
         
-        is_scrollable_container = False
-        for child in node.iter('node'):
-            if child is node: continue
-            child_class = child.get('class', '')
-            if 'ScrollView' in child_class or 'RecyclerView' in child_class:
-                is_scrollable_container = True
-                break
-        if is_scrollable_container:
-            continue
+        bounds = parse_bounds(bounds_str)
+        node_area = (bounds[2] - bounds[0]) * (bounds[3] - bounds[1])
+        area_ratio = node_area / screen_area
 
-        try:
-            node_bounds = parse_bounds(attributes['bounds'])
-            if node_bounds[2] > screen_w or node_bounds[3] > screen_h:
-                continue
-            
-            node_area = (node_bounds[2] - node_bounds[0]) * (node_bounds[3] - node_bounds[1])
-            area_ratio = node_area / screen_area
-        except (ValueError, ZeroDivisionError):
-            continue
+        is_scrim = (attributes.get('clickable') == 'true' and 
+                    area_ratio > 0.5 and 
+                    area_ratio < 1.0)
+        
+        if is_scrim:
+            # The scrim was found. The actual popup is its direct child.
+            for child in node:
+                child_bounds_str = child.attrib.get('bounds')
+                if child_bounds_str and list(child):
+                    child_bounds = parse_bounds(child_bounds_str)
+                    child_area = (child_bounds[2] - child_bounds[0]) * (child_bounds[3] - child_bounds[1])
+                    if child_area > 0 and child_area < node_area:
+                        return child
 
-        if min_area_ratio < area_ratio < max_area_ratio:
-            candidates.append((node_area, node))
-            
-    if not candidates:
-        return None
-    
-    best_candidate_node = max(candidates, key=lambda item: item[0])[1]
-    return best_candidate_node
-
+    return None
 def draw_box(image_path, bounds, output_path="popup_highlighted.png", label="Popup"):
     try:
         img = Image.open(image_path).convert("RGB")
